@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/go-gost/core/limiter"
@@ -32,6 +33,10 @@ type mtlsListener struct {
 	logger  logger.Logger
 	md      metadata
 	options listener.Options
+
+	sessionMutex sync.Mutex
+	sessions     map[*mux.Session]struct{}
+	closed       bool
 }
 
 func NewListener(opts ...listener.Option) listener.Listener {
@@ -40,8 +45,9 @@ func NewListener(opts ...listener.Option) listener.Listener {
 		opt(&options)
 	}
 	return &mtlsListener{
-		logger:  options.Logger,
-		options: options,
+		logger:   options.Logger,
+		options:  options,
+		sessions: make(map[*mux.Session]struct{}),
 	}
 }
 
@@ -103,6 +109,40 @@ func (l *mtlsListener) Accept() (conn net.Conn, err error) {
 	return
 }
 
+// Close closes both the listening socket and every accepted MTLS mux session.
+// Without closing accepted sessions, a service reload can leave the old mux
+// goroutines alive. Clients may keep reusing those still-ESTABLISHED TCP
+// sessions even though the old service no longer consumes their streams.
+func (l *mtlsListener) Close() error {
+	l.sessionMutex.Lock()
+	if l.closed {
+		l.sessionMutex.Unlock()
+		return nil
+	}
+	l.closed = true
+
+	sessions := make([]*mux.Session, 0, len(l.sessions))
+	for session := range l.sessions {
+		sessions = append(sessions, session)
+	}
+	l.sessions = make(map[*mux.Session]struct{})
+	l.sessionMutex.Unlock()
+
+	var err error
+	if l.Listener != nil {
+		err = l.Listener.Close()
+	}
+
+	if len(sessions) > 0 {
+		l.logger.Debugf("mtls: closing %d active mux sessions", len(sessions))
+	}
+	for _, session := range sessions {
+		_ = session.Close()
+	}
+
+	return err
+}
+
 func (l *mtlsListener) listenLoop() {
 	for {
 		conn, err := l.Listener.Accept()
@@ -115,6 +155,23 @@ func (l *mtlsListener) listenLoop() {
 	}
 }
 
+func (l *mtlsListener) trackSession(session *mux.Session) bool {
+	l.sessionMutex.Lock()
+	defer l.sessionMutex.Unlock()
+
+	if l.closed {
+		return false
+	}
+	l.sessions[session] = struct{}{}
+	return true
+}
+
+func (l *mtlsListener) untrackSession(session *mux.Session) {
+	l.sessionMutex.Lock()
+	delete(l.sessions, session)
+	l.sessionMutex.Unlock()
+}
+
 func (l *mtlsListener) mux(conn net.Conn) {
 	defer conn.Close()
 
@@ -123,7 +180,14 @@ func (l *mtlsListener) mux(conn net.Conn) {
 		l.logger.Error(err)
 		return
 	}
-	defer session.Close()
+	if !l.trackSession(session) {
+		_ = session.Close()
+		return
+	}
+	defer func() {
+		l.untrackSession(session)
+		_ = session.Close()
+	}()
 
 	for {
 		stream, err := session.Accept()
