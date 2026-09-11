@@ -146,3 +146,18 @@ func (c *streamConn) Write(b []byte) (n int, err error) {
 func (c *streamConn) Close() error {
 	return c.stream.Close()
 }
+
+// Deadlines must be scoped to the logical SMUX stream. Delegating these calls
+// to the shared underlying connection lets one stream's timeout poison every
+// other stream in the multiplexed session.
+func (c *streamConn) SetDeadline(t time.Time) error {
+	return c.stream.SetDeadline(t)
+}
+
+func (c *streamConn) SetReadDeadline(t time.Time) error {
+	return c.stream.SetReadDeadline(t)
+}
+
+func (c *streamConn) SetWriteDeadline(t time.Time) error {
+	return c.stream.SetWriteDeadline(t)
+}
