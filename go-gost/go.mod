@@ -115,7 +115,7 @@ require (
 	github.com/vulcand/predicate v1.2.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/xtaci/kcp-go/v5 v5.6.5 // indirect
-	github.com/xtaci/smux v1.5.31 // indirect
+	github.com/xtaci/smux v1.5.53 // indirect
 	github.com/xtaci/tcpraw v1.2.25 // indirect
 	github.com/yl2chen/cidranger v1.0.2 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
