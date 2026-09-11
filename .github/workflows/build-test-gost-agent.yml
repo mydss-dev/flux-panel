@@ -10,7 +10,7 @@ on:
       - '.github/workflows/build-test-gost-agent.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-amd64:
@@ -32,8 +32,14 @@ jobs:
           GOOS: linux
           GOARCH: amd64
         run: |
-          go build -trimpath -ldflags='-s -w' -o gost-amd64 ./cmd/gost
-          ./gost-amd64 -V || ./gost-amd64 --version || true
+          set -euo pipefail
+          go list -m github.com/xtaci/smux
+          test "$(go list -m -f '{{.Version}}' github.com/xtaci/smux)" = "v1.5.53"
+          go test ./...
+          (cd x && go test ./...)
+          go build -trimpath -ldflags='-s -w' -o ../gost-amd64 .
+          cd ..
+          ./gost-amd64 --agent-version
           sha256sum gost-amd64 > SHA256SUMS
 
       - name: Upload agent artifact
@@ -41,7 +47,20 @@ jobs:
         with:
           name: gost-amd64-smux-1.5.53
           path: |
-            go-gost/gost-amd64
-            go-gost/SHA256SUMS
+            gost-amd64
+            SHA256SUMS
           if-no-files-found: error
           retention-days: 7
+
+      - name: Publish test release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="agent-smux-1.5.53-test"
+          gh release delete "$tag" --cleanup-tag -y 2>/dev/null || true
+          gh release create "$tag" gost-amd64 SHA256SUMS \
+            --target "$GITHUB_SHA" \
+            --title "GOST Agent smux 1.5.53 test" \
+            --notes "Test build for MTLS/MWSS stability. smux upgraded from v1.5.31 to v1.5.53. Linux amd64 only." \
+            --prerelease
