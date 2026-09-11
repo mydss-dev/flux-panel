@@ -42,7 +42,7 @@ require (
 	github.com/vishvananda/netns v0.0.4
 	github.com/vulcand/predicate v1.2.0
 	github.com/xtaci/kcp-go/v5 v5.6.5
-	github.com/xtaci/smux v1.5.31
+	github.com/xtaci/smux v1.5.53
 	github.com/xtaci/tcpraw v1.2.25
 	github.com/yl2chen/cidranger v1.0.2
 	github.com/zalando/go-keyring v0.2.4
