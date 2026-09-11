@@ -1,0 +1,47 @@
+name: Build test GOST agent
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/update-smux-1.5.53
+    paths:
+      - 'go-gost/**'
+      - '.github/workflows/build-test-gost-agent.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-amd64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go-gost/go.mod
+          cache-dependency-path: go-gost/go.sum
+
+      - name: Build linux amd64 agent
+        working-directory: go-gost
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build -trimpath -ldflags='-s -w' -o gost-amd64 ./cmd/gost
+          ./gost-amd64 -V || ./gost-amd64 --version || true
+          sha256sum gost-amd64 > SHA256SUMS
+
+      - name: Upload agent artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gost-amd64-smux-1.5.53
+          path: |
+            go-gost/gost-amd64
+            go-gost/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
