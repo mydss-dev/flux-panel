@@ -4,17 +4,24 @@ import (
 	"time"
 
 	mdata "github.com/go-gost/core/metadata"
-	mdutil "github.com/go-gost/x/metadata/util"
 	"github.com/go-gost/x/internal/util/mux"
+	mdutil "github.com/go-gost/x/metadata/util"
 )
+
+const defaultSessionLifetime = 2 * time.Minute
 
 type metadata struct {
 	handshakeTimeout time.Duration
+	sessionLifetime  time.Duration
 	muxCfg           *mux.Config
 }
 
 func (d *mtlsDialer) parseMetadata(md mdata.Metadata) (err error) {
 	d.md.handshakeTimeout = mdutil.GetDuration(md, "handshakeTimeout")
+	d.md.sessionLifetime = mdutil.GetDuration(md, "mux.sessionLifetime", "mux.sessionTTL")
+	if d.md.sessionLifetime <= 0 {
+		d.md.sessionLifetime = defaultSessionLifetime
+	}
 
 	d.md.muxCfg = &mux.Config{
 		Version:           mdutil.GetInt(md, "mux.version"),
