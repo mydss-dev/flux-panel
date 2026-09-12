@@ -147,13 +147,12 @@ func updateServices(req updateServicesRequest) error {
 		incoming := req.Data[i]
 		current := findServiceConfig(currentCfg, incoming.Name)
 		if serviceConfigEqual(current, &incoming) {
+			listenerType := ""
+			if incoming.Listener != nil {
+				listenerType = incoming.Listener.Type
+			}
 			fmt.Printf("♻️ UpdateService 配置未变化，跳过重启: service=%s addr=%s listener=%s\n",
-				incoming.Name, incoming.Addr, func() string {
-					if incoming.Listener != nil {
-						return incoming.Listener.Type
-					}
-					return ""
-				}())
+				incoming.Name, incoming.Addr, listenerType)
 			continue
 		}
 		changed = append(changed, incoming)
@@ -201,6 +200,7 @@ func updateServices(req updateServicesRequest) error {
 					c.Services[i] = &serviceConfig
 					break
 				}
+			}
 		}
 		return nil
 	})
@@ -290,23 +290,6 @@ func pauseServices(req pauseServicesRequest) error {
 			return errors.New(fmt.Sprintf("service %s not found", name))
 		}
 
-		//// 检查服务是否已经暂停
-		//var serviceConfig *config.ServiceConfig
-		//for _, s := range cfg.Services {
-		//	if s.Name == name {
-		//		serviceConfig = s
-		//		break
-		//	}
-		//}
-		//
-		//// 如果服务已经暂停，跳过
-		//if serviceConfig != nil && serviceConfig.Metadata != nil {
-		//	if pausedVal, exists := serviceConfig.Metadata["paused"]; exists && pausedVal == true {
-		//		skippedServices = append(skippedServices, name)
-		//		continue
-		//	}
-		//}
-
 		servicesToPause = append(servicesToPause, struct {
 			name    string
 			service service.Service
@@ -330,7 +313,6 @@ func pauseServices(req pauseServicesRequest) error {
 	for _, stp := range servicesToPause {
 		serviceConfig := serviceConfigs[stp.name]
 		if serviceConfig == nil {
-			// 找不到配置，回滚已暂停的服务
 			rollbackPausedServices(pausedServices)
 			return errors.New(fmt.Sprintf("service %s configuration not found", stp.name))
 		}
@@ -343,7 +325,6 @@ func pauseServices(req pauseServicesRequest) error {
 			_ = kill.ForceClosePortConnections(serviceConfig.Addr)
 		}
 
-		// 记录已暂停的服务
 		pausedServices = append(pausedServices, struct {
 			name          string
 			service       service.Service
@@ -368,7 +349,6 @@ func pauseServices(req pauseServicesRequest) error {
 	})
 
 	if err != nil {
-		// 配置更新失败，需要回滚所有暂停的服务
 		rollbackPausedServices(pausedServices)
 		return errors.New(fmt.Sprintf("Failed to update config, rolling back paused services: %v", err))
 	}
@@ -396,13 +376,11 @@ func resumeServices(req resumeServicesRequest) error {
 			return errors.New("service name is required")
 		}
 
-		// 检查服务是否存在
 		svc := registry.ServiceRegistry().Get(name)
 		if svc == nil {
 			return errors.New(fmt.Sprintf("service %s not found", name))
 		}
 
-		// 查找配置中的服务
 		var serviceConfig *config.ServiceConfig
 		for _, s := range cfg.Services {
 			if s.Name == name {
@@ -415,7 +393,6 @@ func resumeServices(req resumeServicesRequest) error {
 			return errors.New(fmt.Sprintf("service %s configuration not found", name))
 		}
 
-		// 检查是否处于暂停状态
 		paused := false
 		if serviceConfig.Metadata != nil {
 			if pausedVal, exists := serviceConfig.Metadata["paused"]; exists && pausedVal == true {
@@ -423,7 +400,6 @@ func resumeServices(req resumeServicesRequest) error {
 			}
 		}
 
-		// 如果服务没有暂停(即正在运行)，跳过
 		if !paused {
 			skippedServices = append(skippedServices, name)
 			continue
@@ -443,33 +419,25 @@ func resumeServices(req resumeServicesRequest) error {
 		serviceConfig *config.ServiceConfig
 	}
 
-	// 逐个恢复服务，如果失败则回滚
 	for _, str := range servicesToResume {
-		// 先关闭现有服务
 		str.service.Close()
 		registry.ServiceRegistry().Unregister(str.name)
 
-		// 等待端口释放
 		time.Sleep(100 * time.Millisecond)
 
-		// 重新解析并启动服务
 		svc, err := parser.ParseService(str.serviceConfig)
 		if err != nil {
-			// 恢复失败，回滚已恢复的服务
 			rollbackResumedServices(resumedServices)
 			return errors.New(fmt.Sprintf("resume service %s failed: %s", str.name, err.Error()))
 		}
 
 		if err := registry.ServiceRegistry().Register(str.name, svc); err != nil {
 			svc.Close()
-			// 恢复失败，回滚已恢复的服务
 			rollbackResumedServices(resumedServices)
 			return errors.New(fmt.Sprintf("service %s already exists", str.name))
 		}
 
 		go svc.Serve()
-
-		// 记录已成功恢复的服务
 		resumedServices = append(resumedServices, str)
 	}
 
@@ -480,7 +448,6 @@ func resumeServices(req resumeServicesRequest) error {
 				if c.Services[i].Name == str.name {
 					if c.Services[i].Metadata != nil {
 						delete(c.Services[i].Metadata, "paused")
-						// 如果 metadata 为空，设置为 nil
 						if len(c.Services[i].Metadata) == 0 {
 							c.Services[i].Metadata = nil
 						}
@@ -493,7 +460,6 @@ func resumeServices(req resumeServicesRequest) error {
 	})
 
 	if err != nil {
-		// 配置更新失败，需要回滚所有已恢复的服务
 		rollbackResumedServices(resumedServices)
 		return errors.New(fmt.Sprintf("Failed to update config, rolling back resumed services: %v", err))
 	}
@@ -507,20 +473,18 @@ func rollbackPausedServices(pausedServices []struct {
 	serviceConfig *config.ServiceConfig
 }) {
 	for _, pss := range pausedServices {
-		// 重新解析并启动服务
 		svc, err := parser.ParseService(pss.serviceConfig)
 		if err != nil {
-			continue // 回滚失败，记录日志但继续处理其他服务
+			continue
 		}
 
 		if err := registry.ServiceRegistry().Register(pss.name, svc); err != nil {
 			svc.Close()
-			continue // 回滚失败，记录日志但继续处理其他服务
+			continue
 		}
 
 		go svc.Serve()
 
-		// 移除暂停状态标记
 		config.OnUpdate(func(c *config.Config) error {
 			for i := range c.Services {
 				if c.Services[i].Name == pss.name {
@@ -544,12 +508,10 @@ func rollbackResumedServices(resumedServices []struct {
 	serviceConfig *config.ServiceConfig
 }) {
 	for _, rss := range resumedServices {
-		// 关闭已恢复的服务
 		if svc := registry.ServiceRegistry().Get(rss.name); svc != nil {
 			svc.Close()
 		}
 
-		// 重新标记为暂停状态
 		config.OnUpdate(func(c *config.Config) error {
 			for i := range c.Services {
 				if c.Services[i].Name == rss.name {
