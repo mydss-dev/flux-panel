@@ -5,13 +5,14 @@ import (
 	"time"
 
 	mdata "github.com/go-gost/core/metadata"
-	mdutil "github.com/go-gost/x/metadata/util"
 	"github.com/go-gost/x/internal/util/mux"
+	mdutil "github.com/go-gost/x/metadata/util"
 )
 
 const (
 	defaultPath            = "/ws"
 	defaultKeepalivePeriod = 15 * time.Second
+	defaultSessionLifetime = 2 * time.Minute
 )
 
 type metadata struct {
@@ -26,6 +27,7 @@ type metadata struct {
 
 	header            http.Header
 	keepaliveInterval time.Duration
+	sessionLifetime   time.Duration
 	muxCfg            *mux.Config
 }
 
@@ -44,6 +46,11 @@ func (d *mwsDialer) parseMetadata(md mdata.Metadata) (err error) {
 		MaxFrameSize:      mdutil.GetInt(md, "mux.maxFrameSize"),
 		MaxReceiveBuffer:  mdutil.GetInt(md, "mux.maxReceiveBuffer"),
 		MaxStreamBuffer:   mdutil.GetInt(md, "mux.maxStreamBuffer"),
+	}
+
+	d.md.sessionLifetime = mdutil.GetDuration(md, "mux.sessionLifetime", "mux.sessionTTL")
+	if d.md.sessionLifetime <= 0 {
+		d.md.sessionLifetime = defaultSessionLifetime
 	}
 
 	d.md.handshakeTimeout = mdutil.GetDuration(md, "ws.handshakeTimeout", "handshakeTimeout")
