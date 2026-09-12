@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"sync"
 	"time"
 
 	"github.com/go-gost/core/limiter"
@@ -40,6 +41,10 @@ type mwsListener struct {
 	logger     logger.Logger
 	md         metadata
 	options    listener.Options
+
+	sessionMutex sync.Mutex
+	sessions     map[*mux.Session]struct{}
+	closed       bool
 }
 
 func NewListener(opts ...listener.Option) listener.Listener {
@@ -48,8 +53,9 @@ func NewListener(opts ...listener.Option) listener.Listener {
 		opt(&options)
 	}
 	return &mwsListener{
-		logger:  options.Logger,
-		options: options,
+		logger:   options.Logger,
+		options:  options,
+		sessions: make(map[*mux.Session]struct{}),
 	}
 }
 
@@ -62,6 +68,7 @@ func NewTLSListener(opts ...listener.Option) listener.Listener {
 		tlsEnabled: true,
 		logger:     options.Logger,
 		options:    options,
+		sessions:   make(map[*mux.Session]struct{}),
 	}
 }
 
@@ -82,11 +89,11 @@ func (l *mwsListener) Init(md md.Metadata) (err error) {
 	if path == "" {
 		path = defaultPath
 	}
-	mux := http.NewServeMux()
-	mux.Handle(path, http.HandlerFunc(l.upgrade))
+	muxer := http.NewServeMux()
+	muxer.Handle(path, http.HandlerFunc(l.upgrade))
 	l.srv = &http.Server{
 		Addr:              l.options.Addr,
-		Handler:           mux,
+		Handler:           muxer,
 		ReadHeaderTimeout: l.md.readHeaderTimeout,
 	}
 
@@ -153,8 +160,36 @@ func (l *mwsListener) Accept() (conn net.Conn, err error) {
 	return
 }
 
+// Close shuts down the HTTP listener and all upgraded WebSocket/SMUX sessions.
+// http.Server.Close does not close hijacked WebSocket connections, so without
+// explicit tracking MWSS sessions can survive service replacement and become
+// stale long-lived transports.
 func (l *mwsListener) Close() error {
-	return l.srv.Close()
+	l.sessionMutex.Lock()
+	if l.closed {
+		l.sessionMutex.Unlock()
+		return nil
+	}
+	l.closed = true
+
+	sessions := make([]*mux.Session, 0, len(l.sessions))
+	for session := range l.sessions {
+		sessions = append(sessions, session)
+	}
+	l.sessions = make(map[*mux.Session]struct{})
+	l.sessionMutex.Unlock()
+
+	var err error
+	if l.srv != nil {
+		err = l.srv.Close()
+	}
+	if len(sessions) > 0 {
+		l.logger.Debugf("mws: closing %d active mux sessions", len(sessions))
+	}
+	for _, session := range sessions {
+		_ = session.Close()
+	}
+	return err
 }
 
 func (l *mwsListener) Addr() net.Addr {
@@ -181,6 +216,22 @@ func (l *mwsListener) upgrade(w http.ResponseWriter, r *http.Request) {
 	l.mux(ws_util.Conn(conn), log)
 }
 
+func (l *mwsListener) trackSession(session *mux.Session) bool {
+	l.sessionMutex.Lock()
+	defer l.sessionMutex.Unlock()
+	if l.closed {
+		return false
+	}
+	l.sessions[session] = struct{}{}
+	return true
+}
+
+func (l *mwsListener) untrackSession(session *mux.Session) {
+	l.sessionMutex.Lock()
+	delete(l.sessions, session)
+	l.sessionMutex.Unlock()
+}
+
 func (l *mwsListener) mux(conn net.Conn, log logger.Logger) {
 	defer conn.Close()
 
@@ -189,7 +240,14 @@ func (l *mwsListener) mux(conn net.Conn, log logger.Logger) {
 		log.Error(err)
 		return
 	}
-	defer session.Close()
+	if !l.trackSession(session) {
+		_ = session.Close()
+		return
+	}
+	defer func() {
+		l.untrackSession(session)
+		_ = session.Close()
+	}()
 
 	for {
 		stream, err := session.Accept()
