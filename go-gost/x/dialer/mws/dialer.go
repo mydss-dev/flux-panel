@@ -72,9 +72,17 @@ func (d *mwsDialer) Dial(ctx context.Context, addr string, opts ...dialer.DialOp
 	defer d.sessionMutex.Unlock()
 
 	session, ok := d.sessions[addr]
-	if session != nil && session.IsClosed() {
-		delete(d.sessions, addr) // session is dead
-		ok = false
+	if session != nil {
+		closed := session.IsClosed()
+		rotate := !closed && session.ShouldRotate(time.Now(), d.md.sessionLifetime)
+		if closed || rotate {
+			if rotate {
+				d.options.Logger.Debugf("mws: rotating idle mux session addr=%s age=%v", addr, time.Since(session.createdAt))
+			}
+			_ = session.Close()
+			delete(d.sessions, addr)
+			ok = false
+		}
 	}
 	if !ok {
 		var options dialer.DialOptions
@@ -87,7 +95,7 @@ func (d *mwsDialer) Dial(ctx context.Context, addr string, opts ...dialer.DialOp
 			return
 		}
 
-		session = &muxSession{conn: conn}
+		session = &muxSession{conn: conn, createdAt: time.Now()}
 		d.sessions[addr] = session
 	}
 
@@ -135,7 +143,7 @@ func (d *mwsDialer) Handshake(ctx context.Context, conn net.Conn, options ...dia
 	cc, err := session.GetConn()
 	if err != nil {
 		log.Error(err)
-		session.Close()
+		_ = session.Close()
 		delete(d.sessions, opts.Addr)
 		return nil, err
 	}
@@ -192,7 +200,7 @@ func (d *mwsDialer) initSession(ctx context.Context, host string, conn net.Conn,
 		log.Error(err)
 		return nil, err
 	}
-	return &muxSession{conn: cc, session: session}, nil
+	return &muxSession{conn: cc, session: session, createdAt: time.Now()}, nil
 }
 
 func (d *mwsDialer) keepAlive(conn ws_util.WebsocketConn) {
