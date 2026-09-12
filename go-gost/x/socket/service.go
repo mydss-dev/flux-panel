@@ -1,6 +1,8 @@
 package socket
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -81,19 +83,55 @@ func createServices(req createServicesRequest) error {
 	return nil
 }
 
+// serviceConfigEqual compares the effective service configuration while ignoring
+// runtime-only status. This prevents periodic control-plane refreshes from
+// tearing down long-lived MTLS/MWSS multiplexed sessions when nothing changed.
+func serviceConfigEqual(a, b *config.ServiceConfig) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	ac := *a
+	bc := *b
+	ac.Status = nil
+	bc.Status = nil
+
+	aj, err := json.Marshal(&ac)
+	if err != nil {
+		return false
+	}
+	bj, err := json.Marshal(&bc)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(aj, bj)
+}
+
+func findServiceConfig(cfg *config.Config, name string) *config.ServiceConfig {
+	if cfg == nil {
+		return nil
+	}
+	for _, svc := range cfg.Services {
+		if svc != nil && svc.Name == name {
+			return svc
+		}
+	}
+	return nil
+}
+
 func updateServices(req updateServicesRequest) error {
 
 	if len(req.Data) == 0 {
 		return errors.New("services list cannot be empty")
 	}
 
-	// 第一阶段：验证所有服务存在
-	for _, serviceConfig := range req.Data {
-		name := strings.TrimSpace(serviceConfig.Name)
+	// 第一阶段：规范化并验证所有服务存在。
+	for i := range req.Data {
+		name := strings.TrimSpace(req.Data[i].Name)
 		if name == "" {
 			return errors.New("service name is required")
 		}
-		serviceConfig.Name = name
+		req.Data[i].Name = name
 
 		old := registry.ServiceRegistry().Get(name)
 		if old == nil {
@@ -101,10 +139,34 @@ func updateServices(req updateServicesRequest) error {
 		}
 	}
 
-	// 第二阶段：按照原来的updateService逻辑，逐个更新服务
-	for _, serviceConfig := range req.Data {
-		name := strings.TrimSpace(serviceConfig.Name)
-		serviceConfig.Name = name
+	// 控制面会周期性发送 UpdateService。若配置没有实际变化，不应关闭并
+	// 重建服务，否则 MTLS/MWSS 的长生命周期 mux session 会被周期性打断。
+	currentCfg := config.Global()
+	changed := make([]config.ServiceConfig, 0, len(req.Data))
+	for i := range req.Data {
+		incoming := req.Data[i]
+		current := findServiceConfig(currentCfg, incoming.Name)
+		if serviceConfigEqual(current, &incoming) {
+			fmt.Printf("♻️ UpdateService 配置未变化，跳过重启: service=%s addr=%s listener=%s\n",
+				incoming.Name, incoming.Addr, func() string {
+					if incoming.Listener != nil {
+						return incoming.Listener.Type
+					}
+					return ""
+				}())
+			continue
+		}
+		changed = append(changed, incoming)
+	}
+
+	if len(changed) == 0 {
+		return nil
+	}
+
+	// 第二阶段：只重建真正发生变化的服务。
+	for _, serviceConfig := range changed {
+		name := serviceConfig.Name
+		fmt.Printf("🔄 UpdateService 配置已变化，重启服务: service=%s addr=%s\n", name, serviceConfig.Addr)
 
 		// 1. 获取旧服务
 		old := registry.ServiceRegistry().Get(name)
@@ -131,15 +193,14 @@ func updateServices(req updateServicesRequest) error {
 		go svc.Serve()
 	}
 
-	// 第三阶段：更新配置
+	// 第三阶段：只更新真正变化的配置。
 	config.OnUpdate(func(c *config.Config) error {
-		for _, serviceConfig := range req.Data {
+		for _, serviceConfig := range changed {
 			for i := range c.Services {
 				if c.Services[i].Name == serviceConfig.Name {
 					c.Services[i] = &serviceConfig
 					break
 				}
-			}
 		}
 		return nil
 	})
@@ -320,7 +381,7 @@ func resumeServices(req resumeServicesRequest) error {
 		return errors.New("services list cannot be empty")
 	}
 
-	// 第一阶段：验证所有服务是否存在，并筛选需要恢复的服务
+	// 第一阶段：验证所有服务存在，并筛选需要恢复的服务
 	var servicesToResume []struct {
 		name          string
 		service       service.Service
@@ -432,7 +493,7 @@ func resumeServices(req resumeServicesRequest) error {
 	})
 
 	if err != nil {
-		// 配置更新失败，回滚所有已恢复的服务
+		// 配置更新失败，需要回滚所有已恢复的服务
 		rollbackResumedServices(resumedServices)
 		return errors.New(fmt.Sprintf("Failed to update config, rolling back resumed services: %v", err))
 	}
